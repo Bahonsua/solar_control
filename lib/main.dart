@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'dart:convert';
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 void main() {
@@ -34,20 +34,27 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   BluetoothConnection? _connection;
   bool _isConnected = false;
   bool _isScanning = false;
+  bool _isManualMode = false;
 
-  // 3 batteries data
-  List<double> _batteryVoltages = [0.0, 0.0, 0.0];
-  List<String> _batteryModes = ["STANDBY", "STANDBY", "STANDBY"];
-  List<bool> _batteryConnected = [false, false, false];
+  // 5 batteries data
+  static const int _numBatteries = 5;
+  static const int _numRelays = 10; // 2 relays per battery
 
-  // Filter state - Default to showing all batteries
-  String _currentFilter = "ALL"; // ALL, CHARGING, DISCHARGING, STANDBY
+  List<double> _batteryVoltages = List.filled(_numBatteries, 0.0);
+  List<String> _batteryModes = List.filled(_numBatteries, "STANDBY");
+  List<bool> _batteryConnected = List.filled(_numBatteries, false);
 
+  // Manual mode relay states (10 relays)
+  // ESP32 MAPPING:
+  // Indices 0-4: Charging relays for batteries 0-4
+  // Indices 5-9: Discharging relays for batteries 0-4
+  List<bool> _relayStates = List.generate(_numRelays, (index) => false);
+
+  String _currentFilter = "ALL";
   String _status = "Disconnected";
   final List<String> _log = [];
 
   StreamSubscription<BluetoothDiscoveryResult>? _discoveryStreamSubscription;
-  StreamSubscription<List<BluetoothDevice>>? _pairedDevicesSubscription;
   Timer? _pollingTimer;
 
   @override
@@ -65,7 +72,6 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   void _cleanupResources() {
     _pollingTimer?.cancel();
     _discoveryStreamSubscription?.cancel();
-    _pairedDevicesSubscription?.cancel();
     _disconnect();
   }
 
@@ -114,7 +120,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
           .startDiscovery()
           .listen((BluetoothDiscoveryResult result) {
             final deviceName = result.device.name ?? "";
-            _addLog("Found: $deviceName (${result.device.address})");
+            _addLog("Found: $deviceName");
 
             if (deviceName.contains("SMART_BATTERY_SYSTEM")) {
               _connectToDevice(result.device);
@@ -169,7 +175,6 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     _connection!.input!.listen(
       (Uint8List data) {
         String receivedData = String.fromCharCodes(data).trim();
-
         if (receivedData.isNotEmpty) {
           _addLog("📥 Raw: '$receivedData'");
           _processReceivedData(receivedData);
@@ -192,14 +197,11 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     _pollingTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
       if (!_isConnected || _connection == null) {
         timer.cancel();
-        _addLog("Polling stopped");
         return;
       }
 
-      try {
+      if (!_isManualMode) {
         _sendCommand("STATUS");
-      } catch (e) {
-        _addLog("Poll error: $e");
       }
     });
   }
@@ -219,110 +221,68 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     }
   }
 
+  Future<void> _sendModeCommand(String mode) async {
+    if (_connection == null || !_connection!.isConnected) return;
+    try {
+      _connection!.output.add(utf8.encode("MODE:$mode\n"));
+      await _connection!.output.allSent;
+      _addLog("📤 Sent: MODE:$mode");
+    } catch (e) {
+      _addLog("Send mode error: $e");
+    }
+  }
+
+  // Send relay command with CORRECT relay number (1-10)
+  Future<void> _sendRelayCommand(int relayNumber, bool state) async {
+    if (_connection == null || !_connection!.isConnected) return;
+
+    String command = "RELAY$relayNumber:${state ? 'ON' : 'OFF'}";
+    try {
+      _connection!.output.add(utf8.encode("$command\n"));
+      await _connection!.output.allSent;
+      _addLog("📤 Sent: $command");
+    } catch (e) {
+      _addLog("Send relay error: $e");
+    }
+  }
+
   void _processReceivedData(String data) {
     try {
-      if (data.contains("BATT1:") &&
-          data.contains("BATT2:") &&
-          data.contains("BATT3:")) {
-        List<double> voltages = [];
-        List<bool> connected = [false, false, false];
+      // Parse battery voltages
+      for (int i = 1; i <= _numBatteries; i++) {
+        String pattern = "BATT$i:";
+        if (data.contains(pattern)) {
+          int startIdx = data.indexOf(pattern) + pattern.length;
+          int endIdx = data.indexOf("V", startIdx);
 
-        // Extract each battery voltage
-        for (int i = 1; i <= 3; i++) {
-          try {
-            String pattern = "BATT$i:";
-            int startIdx = data.indexOf(pattern);
+          if (endIdx != -1) {
+            String voltStr = data.substring(startIdx, endIdx).trim();
+            double voltage = double.tryParse(voltStr) ?? 0.0;
 
-            if (startIdx != -1) {
-              startIdx += pattern.length;
-              int endIdx = data.indexOf("V", startIdx);
-
-              if (endIdx != -1) {
-                String voltStr = data
-                    .substring(startIdx, endIdx)
-                    .replaceAll("V", "")
-                    .trim();
-                double voltage = double.tryParse(voltStr) ?? 0.0;
-
-                if (voltage > 0 && voltage < 20) {
-                  voltages.add(voltage);
-                  connected[i - 1] = true;
-                  _addLog("✅ BATT$i: $voltStr V");
-                } else {
-                  voltages.add(0.0);
-                  connected[i - 1] = false;
-                  _addLog("⚠️ BATT$i Invalid: $voltStr");
-                }
-              }
-            } else {
-              voltages.add(0.0);
-              connected[i - 1] = false;
-            }
-          } catch (e) {
-            voltages.add(0.0);
-            connected[i - 1] = false;
-            _addLog("❌ Parse BATT$i error: $e");
+            setState(() {
+              _batteryVoltages[i - 1] = voltage;
+              _batteryConnected[i - 1] = (voltage > 0 && voltage < 20);
+            });
+            _addLog("BATT$i: $voltStr V");
           }
         }
+      }
 
-        if (voltages.length == 3) {
+      // Parse modes
+      if (data.contains("MODES:")) {
+        int modesIdx = data.indexOf("MODES:") + 6;
+        String modesStr = data.substring(modesIdx);
+
+        List<String> modes = modesStr.split(",");
+        for (int i = 0; i < modes.length && i < _numBatteries; i++) {
           setState(() {
-            _batteryVoltages = voltages;
-            _batteryConnected = connected;
+            _batteryModes[i] = modes[i];
           });
-          _addLog("✅ All voltages updated!");
         }
-
-        // Extract modes
-        if (data.contains("MODES:")) {
-          try {
-            int modesIdx = data.indexOf("MODES:") + 6;
-            String modesStr = data.substring(modesIdx);
-            if (modesStr.contains(",CONN:")) {
-              modesStr = modesStr.split(",CONN:")[0];
-            }
-            List<String> modes = modesStr
-                .split(",")
-                .map((m) => m.trim())
-                .where((m) => m.isNotEmpty)
-                .toList();
-
-            if (modes.length >= 3) {
-              setState(() {
-                _batteryModes = [modes[0], modes[1], modes[2]];
-              });
-              _addLog("✅ Modes: ${modes.sublist(0, 3).join(', ')}");
-            }
-          } catch (e) {
-            _addLog("Mode parse error: $e");
-          }
-        }
-
-        if (data.contains("CONN:")) {
-          try {
-            int connIdx = data.indexOf("CONN:") + 5;
-            String connStr = data.substring(connIdx).trim();
-            List<String> connValues = connStr.split(",");
-
-            if (connValues.length >= 3) {
-              List<bool> newConnected = [];
-              for (String val in connValues.sublist(0, 3)) {
-                newConnected.add(val == "1");
-              }
-              setState(() {
-                _batteryConnected = newConnected;
-              });
-              _addLog("✅ Connection status updated");
-            }
-          } catch (e) {
-            _addLog("Connection status parse error: $e");
-          }
-        }
-      } else {
-        _addLog("⚠️ Incomplete data format");
+        _addLog("Modes: ${modes.join(', ')}");
       }
     } catch (e) {
-      _addLog("❌ Process error: $e");
+      _addLog("Parse error: $e");
     }
   }
 
@@ -342,10 +302,12 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
         _isConnected = false;
         _connection = null;
         _status = "Disconnected";
-        _batteryVoltages = [0.0, 0.0, 0.0];
-        _batteryModes = ["STANDBY", "STANDBY", "STANDBY"];
-        _batteryConnected = [false, false, false];
+        _batteryVoltages = List.filled(_numBatteries, 0.0);
+        _batteryModes = List.filled(_numBatteries, "STANDBY");
+        _batteryConnected = List.filled(_numBatteries, false);
         _currentFilter = "ALL";
+        _isManualMode = false;
+        _relayStates = List.generate(_numRelays, (index) => false);
       });
     }
     _addLog("Disconnected");
@@ -356,27 +318,97 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     setState(() => _isScanning = false);
   }
 
-  Color _getModeColor(String mode) {
-    switch (mode) {
-      case "CHARGING":
-        return Colors.green;
-      case "DISCHARGING":
-        return Colors.orange;
-      case "STANDBY":
-        return Colors.blue;
-      default:
-        return Colors.grey;
+  void _toggleManualMode(bool value) {
+    setState(() {
+      _isManualMode = value;
+    });
+
+    if (value) {
+      _sendModeCommand("MANUAL");
+      _addLog("Manual mode enabled");
+    } else {
+      _sendModeCommand("AUTO");
+      _addLog("Auto mode enabled");
     }
   }
 
-  // Filter batteries based on selected mode
+  // Get ESP32 relay indices (0-9)
+  // Charging relays: indices 0-4 for batteries 0-4
+  // Discharging relays: indices 5-9 for batteries 0-4
+  int _getChargingRelayIndex(int batteryIndex) {
+    return batteryIndex; // 0,1,2,3,4
+  }
+
+  int _getDischargingRelayIndex(int batteryIndex) {
+    return batteryIndex + 5; // 5,6,7,8,9
+  }
+
+  // Get display relay numbers (1-10) for UI
+  int _getDisplayRelayNumber(int relayIndex) {
+    return relayIndex + 1;
+  }
+
+  // Toggle charging relay for a battery
+  void _toggleChargingRelay(int batteryIndex) {
+    int relayIndex = _getChargingRelayIndex(batteryIndex);
+    int displayNumber = _getDisplayRelayNumber(relayIndex);
+
+    setState(() {
+      _relayStates[relayIndex] = !_relayStates[relayIndex];
+    });
+    _sendRelayCommand(displayNumber, _relayStates[relayIndex]);
+    _addLog(
+      "Battery ${batteryIndex + 1} Charging: ${_relayStates[relayIndex] ? 'ON' : 'OFF'}",
+    );
+  }
+
+  // Toggle discharging relay for a battery
+  void _toggleDischargingRelay(int batteryIndex) {
+    int relayIndex = _getDischargingRelayIndex(batteryIndex);
+    int displayNumber = _getDisplayRelayNumber(relayIndex);
+
+    setState(() {
+      _relayStates[relayIndex] = !_relayStates[relayIndex];
+    });
+    _sendRelayCommand(displayNumber, _relayStates[relayIndex]);
+    _addLog(
+      "Battery ${batteryIndex + 1} Discharging: ${_relayStates[relayIndex] ? 'ON' : 'OFF'}",
+    );
+  }
+
+  void _allRelaysOn() {
+    setState(() {
+      for (int i = 0; i < _relayStates.length; i++) {
+        _relayStates[i] = true;
+      }
+    });
+
+    for (int i = 1; i <= 10; i++) {
+      _sendRelayCommand(i, true);
+    }
+    _addLog("All relays turned ON");
+  }
+
+  void _allRelaysOff() {
+    setState(() {
+      for (int i = 0; i < _relayStates.length; i++) {
+        _relayStates[i] = false;
+      }
+    });
+
+    for (int i = 1; i <= 10; i++) {
+      _sendRelayCommand(i, false);
+    }
+    _addLog("All relays turned OFF");
+  }
+
   List<int> _getFilteredBatteries() {
     if (_currentFilter == "ALL") {
-      return [0, 1, 2];
+      return List.generate(_numBatteries, (index) => index);
     }
 
     List<int> filteredIndices = [];
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < _numBatteries; i++) {
       if (_batteryModes[i] == _currentFilter) {
         filteredIndices.add(i);
       }
@@ -390,22 +422,36 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Battery Monitor'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         actions: [
-          if (_isConnected)
+          Row(
+            children: [
+              Text(
+                _isManualMode ? "MANUAL" : "AUTO",
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: _isManualMode ? Colors.orange : Colors.white,
+                ),
+              ),
+              Switch(
+                value: _isManualMode,
+                onChanged: _isConnected ? _toggleManualMode : null,
+                activeColor: Colors.orange,
+              ),
+            ],
+          ),
+          if (_isConnected && !_isManualMode)
             IconButton(
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Icons.notifications_active_outlined),
               onPressed: () => _sendCommand("STATUS"),
-              tooltip: "Refresh",
             ),
           IconButton(
             icon: Icon(
               _isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
             ),
             onPressed: _isConnected ? _disconnect : _startScanning,
-            tooltip: _isConnected ? "Disconnect" : "Connect",
           ),
         ],
       ),
@@ -429,161 +475,13 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                   _buildStatusCard(),
                   const SizedBox(height: 10),
 
-                  // Filter buttons (with shorter labels)
-                  Card(
-                    elevation: 8,
-                    color: const Color.fromARGB(255, 145, 201, 246),
-                    child: Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Padding(
-                            padding: EdgeInsets.only(bottom: 6.0),
-                            child: Text(
-                              "Battery Modes",
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                          Wrap(
-                            spacing: 5.0,
-                            runSpacing: 5.0,
-                            alignment: WrapAlignment.center,
-                            children: [
-                              _buildFilterButton(
-                                "CHARGE",
-                                Icons.electric_bolt,
-                                "CHARGING",
-                              ),
-                              _buildFilterButton(
-                                "DISCHARGE",
-                                Icons.power,
-                                "DISCHARGING",
-                              ),
-                              _buildFilterButton(
-                                "STANDBY",
-                                Icons.pause,
-                                "STANDBY",
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          // Show All button (text only)
-                          Center(
-                            child: TextButton(
-                              onPressed: () {
-                                setState(() {
-                                  _currentFilter = "ALL";
-                                });
-                                _addLog("Showing all batteries");
-                              },
-                              child: Text(
-                                "SHOW ALL",
-                                style: TextStyle(
-                                  color: _currentFilter == "ALL"
-                                      ? Colors.purple
-                                      : Colors.blue,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  if (_isManualMode && _isConnected)
+                    _buildManualDashboard()
+                  else
+                    _buildAutoDashboard(filteredBatteries),
 
                   const SizedBox(height: 10),
-
-                  // Voltage dashboard
-                  Card(
-                    elevation: 8,
-                    color: const Color.fromARGB(255, 145, 201, 246),
-                    child: Padding(
-                      padding: const EdgeInsets.all(10.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Expanded(
-                                child: Text(
-                                  "Voltage Dashboard",
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              Container(
-                                constraints: BoxConstraints(
-                                  maxWidth:
-                                      MediaQuery.of(context).size.width * 0.35,
-                                ),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 6,
-                                  vertical: 3,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: _getFilterColor(_currentFilter),
-                                  borderRadius: BorderRadius.circular(5),
-                                ),
-                                child: Text(
-                                  _currentFilter == "ALL"
-                                      ? "ALL"
-                                      : _currentFilter,
-                                  style: const TextStyle(
-                                    color: Color.fromARGB(255, 233, 240, 242),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            "Showing ${filteredBatteries.length} battery(s)",
-                            style: const TextStyle(
-                              color: Color.fromARGB(255, 15, 78, 251),
-                              fontSize: 11,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-
-                          if (filteredBatteries.isEmpty)
-                            const Padding(
-                              padding: EdgeInsets.all(12.0),
-                              child: Center(
-                                child: Text(
-                                  "No batteries match filter",
-                                  style: TextStyle(
-                                    color: Colors.grey,
-                                    fontSize: 13,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                              ),
-                            )
-                          else
-                            ...filteredBatteries
-                                .map((index) => _buildVoltageCard(index))
-                                .toList(),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 10),
-                  if (_isConnected) _buildControlButtons(),
-                  if (_isConnected) const SizedBox(height: 10),
+                  if (_isConnected && !_isManualMode) _buildControlButtons(),
                   SizedBox(height: 160, child: _buildActivityLog()),
                 ],
               ),
@@ -594,40 +492,366 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     );
   }
 
-  Widget _buildVoltageCard(int batteryIndex) {
+  Widget _buildAutoDashboard(List<int> filteredBatteries) {
+    return Column(
+      children: [
+        Card(
+          elevation: 4,
+          color: const Color.fromARGB(255, 145, 201, 246),
+          child: Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Column(
+              children: [
+                Wrap(
+                  spacing: 5,
+                  children: [
+                    _buildFilterButton("ALL", Icons.list, "ALL"),
+                    _buildFilterButton(
+                      "CHARGING",
+                      Icons.electric_bolt,
+                      "CHARGING",
+                    ),
+                    _buildFilterButton(
+                      "DISCHARGING",
+                      Icons.power,
+                      "DISCHARGING",
+                    ),
+                    _buildFilterButton("STANDBY", Icons.pause, "STANDBY"),
+                  ],
+                ),
+                Center(
+                  child: TextButton(
+                    onPressed: () {
+                      setState(() => _currentFilter = "ALL");
+                      _addLog("Showing all batteries");
+                    },
+                    child: Text(
+                      "SHOW ALL (5 Batteries)",
+                      style: TextStyle(
+                        color: _currentFilter == "ALL"
+                            ? Colors.purple
+                            : Colors.blue,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 10),
+
+        Card(
+          elevation: 4,
+          color: const Color.fromARGB(255, 145, 201, 246),
+          child: Padding(
+            padding: const EdgeInsets.all(10.0),
+            child: Column(
+              children: [
+                Text(
+                  "Showing ${filteredBatteries.length} of $_numBatteries batteries",
+                  style: const TextStyle(fontSize: 12),
+                ),
+                const SizedBox(height: 10),
+
+                if (filteredBatteries.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(12.0),
+                    child: Center(child: Text("No batteries match filter")),
+                  )
+                else
+                  ...filteredBatteries
+                      .map((index) => _buildVoltageCard(index))
+                      .toList(),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildManualDashboard() {
     return Card(
       elevation: 4,
-      margin: const EdgeInsets.only(bottom: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(
-          16.0,
-        ), // Increased padding for better spacing
-        child: Column(
-          children: [
-            // Battery label only
-            Text(
-              "BATTERY ${batteryIndex + 1}",
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: Colors.black,
-              ),
+      color: const Color.fromARGB(255, 255, 243, 176),
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.65,
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                const Center(
+                  child: Text(
+                    "MANUAL CONTROL DASHBOARD",
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(height: 20),
+
+                Card(
+                  color: Colors.blue.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        const Text(
+                          "5 BATTERY VOLTAGES",
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        for (int i = 0; i < _numBatteries; i++) ...[
+                          _buildBatteryStatusRow(i),
+                          if (i < _numBatteries - 1) const SizedBox(height: 12),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 20),
+
+                Card(
+                  color: Colors.orange.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        const Text(
+                          "RELAY CONTROL",
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        for (int i = 0; i < _numBatteries; i++) ...[
+                          _buildBatteryRelayControl(i),
+                          if (i < _numBatteries - 1) const Divider(height: 30),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            // Voltage display only (centered and prominent)
-            Center(
-              child: Text(
+          ),
+        ),
+      ),
+    );
+  }
+
+  // NEW: Correct relay control with proper mapping
+  Widget _buildBatteryRelayControl(int batteryIndex) {
+    int chargingRelayIndex = _getChargingRelayIndex(batteryIndex);
+    int dischargingRelayIndex = _getDischargingRelayIndex(batteryIndex);
+
+    int chargingDisplayNumber = chargingRelayIndex + 1; // 1,2,3,4,5
+    int dischargingDisplayNumber = dischargingRelayIndex + 1; // 6,7,8,9,10
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          "BATTERY ${batteryIndex + 1}",
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+            color: Colors.orange,
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // Charging relay (using correct ESP32 index)
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 60,
+                    child: Text(
+                      "RELAY $chargingDisplayNumber",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text("Charging", style: TextStyle(color: Colors.green)),
+                ],
+              ),
+              Row(
+                children: [
+                  Text(
+                    _relayStates[chargingRelayIndex] ? "ON" : "OFF",
+                    style: TextStyle(
+                      color: _relayStates[chargingRelayIndex]
+                          ? Colors.green
+                          : Colors.grey,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Switch(
+                    value: _relayStates[chargingRelayIndex],
+                    onChanged: (value) => _toggleChargingRelay(batteryIndex),
+                    activeColor: Colors.green,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+
+        // Discharging relay (using correct ESP32 index)
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 60,
+                    child: Text(
+                      "RELAY $dischargingDisplayNumber",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    "Discharging",
+                    style: TextStyle(color: Colors.orange),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Text(
+                    _relayStates[dischargingRelayIndex] ? "ON" : "OFF",
+                    style: TextStyle(
+                      color: _relayStates[dischargingRelayIndex]
+                          ? Colors.orange
+                          : Colors.grey,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Switch(
+                    value: _relayStates[dischargingRelayIndex],
+                    onChanged: (value) => _toggleDischargingRelay(batteryIndex),
+                    activeColor: Colors.orange,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildBatteryStatusRow(int batteryIndex) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "BATTERY ${batteryIndex + 1}",
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              Text(
+                _batteryModes[batteryIndex],
+                style: TextStyle(
+                  color: _getModeColor(_batteryModes[batteryIndex]),
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
                 _batteryConnected[batteryIndex] &&
                         _batteryVoltages[batteryIndex] > 0
                     ? '${_batteryVoltages[batteryIndex].toStringAsFixed(2)} V'
                     : '--- V',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              Text(
+                _batteryConnected[batteryIndex] ? "Connected" : "Disconnected",
                 style: TextStyle(
-                  fontSize: 32, // Larger font for voltage
-                  fontWeight: FontWeight.bold,
                   color: _batteryConnected[batteryIndex]
-                      ? Colors.blue
-                      : Colors.grey,
+                      ? Colors.green
+                      : Colors.red,
+                  fontSize: 10,
                 ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _getModeColor(String mode) {
+    switch (mode) {
+      case "CHARGING":
+        return Colors.green;
+      case "DISCHARGING":
+        return Colors.orange;
+      case "STANDBY":
+        return Colors.blue;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  Widget _buildVoltageCard(int index) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  "BATTERY ${index + 1}",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  _batteryModes[index],
+                  style: TextStyle(color: _getModeColor(_batteryModes[index])),
+                ),
+              ],
+            ),
+            Text(
+              _batteryConnected[index] && _batteryVoltages[index] > 0
+                  ? '${_batteryVoltages[index].toStringAsFixed(2)} V'
+                  : '--- V',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: _batteryConnected[index] ? Colors.blue : Colors.grey,
               ),
             ),
           ],
@@ -636,29 +860,16 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     );
   }
 
-  Widget _buildFilterButton(String displayText, IconData icon, String mode) {
-    final isSelected = _currentFilter == mode;
-    return SizedBox(
-      height: 32,
-      child: ElevatedButton.icon(
-        onPressed: () {
-          setState(() {
-            _currentFilter = mode;
-          });
-          _addLog("Modes changed to: $mode");
-        },
-        icon: Icon(icon, size: 14),
-        label: Text(displayText, style: TextStyle(fontSize: 11)),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: isSelected
-              ? _getFilterColor(mode)
-              : Colors.grey[200],
-          foregroundColor: isSelected ? Colors.white : Colors.black,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-          minimumSize: Size.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
+  Widget _buildFilterButton(String text, IconData icon, String filterValue) {
+    bool isSelected = _currentFilter == filterValue;
+    return ElevatedButton.icon(
+      onPressed: () => setState(() => _currentFilter = filterValue),
+      icon: Icon(icon, size: 16),
+      label: Text(text),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: isSelected ? Colors.blue : Colors.grey[300],
+        foregroundColor: isSelected ? Colors.white : Colors.black,
+        minimumSize: const Size(0, 30),
       ),
     );
   }
@@ -680,7 +891,6 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
   Widget _buildStatusCard() {
     return Card(
-      elevation: 8,
       child: Padding(
         padding: const EdgeInsets.all(10.0),
         child: Row(
@@ -690,7 +900,6 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                   ? Icons.bluetooth_connected
                   : Icons.bluetooth_disabled,
               color: _isConnected ? Colors.green : Colors.red,
-              size: 24,
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -700,26 +909,22 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                   Text(
                     _status,
                     style: TextStyle(
-                      fontSize: 14,
                       fontWeight: FontWeight.bold,
                       color: _isConnected ? Colors.green : Colors.red,
                     ),
-                    overflow: TextOverflow.ellipsis,
                   ),
                   Text(
-                    _isConnected ? "Connected" : "Tap to connect",
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
-                    overflow: TextOverflow.ellipsis,
+                    _isManualMode
+                        ? "Manual Mode"
+                        : _isConnected
+                        ? "Smart Battery Switching Auto Mode"
+                        : "Tap to connect",
+                    style: const TextStyle(fontSize: 11, color: Colors.grey),
                   ),
                 ],
               ),
             ),
-            if (_isScanning)
-              const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+            if (_isScanning) const CircularProgressIndicator(strokeWidth: 2),
           ],
         ),
       ),
@@ -728,75 +933,22 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
   Widget _buildControlButtons() {
     return Card(
-      elevation: 8,
       child: Padding(
         padding: const EdgeInsets.all(8.0),
         child: Wrap(
-          alignment: WrapAlignment.center,
-          spacing: 4.0,
-          runSpacing: 4.0,
+          spacing: 95,
           children: [
-            SizedBox(
-              height: 30,
-              child: ElevatedButton.icon(
-                onPressed: () => _sendCommand("STATUS"),
-                icon: const Icon(Icons.refresh, size: 12),
-                label: const Text("Refresh", style: TextStyle(fontSize: 11)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
+            ElevatedButton(
+              onPressed: () => _sendCommand("STATUS"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color.fromARGB(255, 70, 228, 107),
               ),
+              child: const Text("Refresh"),
             ),
-            SizedBox(
-              height: 30,
-              child: ElevatedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _currentFilter = "ALL";
-                  });
-                  _addLog("Reset filter to ALL");
-                },
-                icon: const Icon(Icons.filter_alt_off, size: 12),
-                label: const Text(
-                  "Clear Filter",
-                  style: TextStyle(fontSize: 11),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.grey,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
-            ),
-            SizedBox(
-              height: 30,
-              child: ElevatedButton.icon(
-                onPressed: () => _disconnect(),
-                icon: const Icon(Icons.power_settings_new, size: 12),
-                label: const Text("Disconnect", style: TextStyle(fontSize: 11)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ),
+            ElevatedButton(
+              onPressed: _disconnect,
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text("Disconnect"),
             ),
           ],
         ),
@@ -806,47 +958,34 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
   Widget _buildActivityLog() {
     return Card(
-      elevation: 8,
       color: const Color.fromARGB(255, 145, 201, 246),
       child: Padding(
-        padding: const EdgeInsets.all(10.0),
+        padding: const EdgeInsets.all(8.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
               "Activity Log",
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+              style: TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 4),
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
                   color: Colors.grey[50],
-                  borderRadius: BorderRadius.circular(5),
-                  border: Border.all(
-                    color: const Color.fromARGB(255, 215, 26, 248)!,
-                  ),
+                  borderRadius: BorderRadius.circular(4),
                 ),
                 padding: const EdgeInsets.all(4),
                 child: _log.isEmpty
-                    ? const Center(
-                        child: Text(
-                          "No activity yet",
-                          style: TextStyle(color: Colors.grey, fontSize: 11),
-                        ),
-                      )
+                    ? const Center(child: Text("No activity yet"))
                     : ListView.builder(
                         reverse: true,
                         itemCount: _log.length,
-                        itemBuilder: (context, index) => Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 1),
-                          child: Text(
-                            _log[index],
-                            style: const TextStyle(
-                              fontSize: 8,
-                              fontFamily: 'Monospace',
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                        itemBuilder: (context, index) => Text(
+                          _log[index],
+                          style: const TextStyle(
+                            fontSize: 8,
+                            fontFamily: 'Monospace',
                           ),
                         ),
                       ),
