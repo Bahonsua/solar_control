@@ -36,6 +36,12 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   bool _isScanning = false;
   bool _isManualMode = false;
 
+  // NEW: Alert thresholds
+  static const double CRITICAL_VOLTAGE = 7.0; // Alert when below 7V
+  bool _hasCriticalAlert = false;
+  List<int> _criticalBatteries = [];
+  Timer? _alertTimer;
+
   // 5 batteries data
   static const int _numBatteries = 5;
   static const int _numRelays = 10; // 2 relays per battery
@@ -61,12 +67,125 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   void initState() {
     super.initState();
     _initializeBluetooth();
+    _startAlertChecker();
   }
 
   @override
   void dispose() {
     _cleanupResources();
+    _alertTimer?.cancel();
     super.dispose();
+  }
+
+  void _startAlertChecker() {
+    _alertTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+      if (_isConnected && mounted) {
+        _checkCriticalVoltage();
+      }
+    });
+  }
+
+  void _checkCriticalVoltage() {
+    List<int> criticalBatteries = [];
+
+    for (int i = 0; i < _numBatteries; i++) {
+      if (_batteryConnected[i] &&
+          _batteryVoltages[i] > 0 &&
+          _batteryVoltages[i] < CRITICAL_VOLTAGE) {
+        criticalBatteries.add(i + 1); // Store battery number (1-5)
+      }
+    }
+
+    setState(() {
+      _criticalBatteries = criticalBatteries;
+      _hasCriticalAlert = criticalBatteries.isNotEmpty;
+    });
+
+    if (criticalBatteries.isNotEmpty) {
+      _addLog(
+        "⚠️ CRITICAL: Batteries ${criticalBatteries.join(', ')} below ${CRITICAL_VOLTAGE}V!",
+      );
+    }
+  }
+
+  void _showCriticalAlertDialog() {
+    if (_criticalBatteries.isEmpty) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red, size: 30),
+              const SizedBox(width: 10),
+              const Text(
+                '⚠️ CRITICAL VOLTAGE ALERT!',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('The following batteries are below 7V:'),
+              const SizedBox(height: 10),
+              ..._criticalBatteries
+                  .map(
+                    (batteryNum) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.battery_alert,
+                            color: Colors.red,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Battery $batteryNum: ${_batteryVoltages[batteryNum - 1].toStringAsFixed(2)}V',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                  .toList(),
+              const SizedBox(height: 10),
+              const Text(
+                'Please check connections/Charge immediately!',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('DISMISS'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _sendCommand("STATUS");
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('CHECK NOW'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _cleanupResources() {
@@ -281,6 +400,9 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
         }
         _addLog("Modes: ${modes.join(', ')}");
       }
+
+      // Check for critical voltage after updating
+      _checkCriticalVoltage();
     } catch (e) {
       _addLog("Parse error: $e");
     }
@@ -308,6 +430,8 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
         _currentFilter = "ALL";
         _isManualMode = false;
         _relayStates = List.generate(_numRelays, (index) => false);
+        _hasCriticalAlert = false;
+        _criticalBatteries.clear();
       });
     }
     _addLog("Disconnected");
@@ -422,9 +546,56 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        title: const Text('5 Battery Monitor System'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         actions: [
+          // NEW: Notification Icon with Badge
+          if (_isConnected && !_isManualMode)
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                IconButton(
+                  icon: Icon(
+                    _hasCriticalAlert
+                        ? Icons.notifications_active
+                        : Icons.notifications_none,
+                    color: _hasCriticalAlert ? Colors.red : Colors.white,
+                    size: 24,
+                  ),
+                  onPressed: _hasCriticalAlert
+                      ? _showCriticalAlertDialog
+                      : () => _sendCommand("STATUS"),
+                ),
+                if (_hasCriticalAlert && _criticalBatteries.isNotEmpty)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      constraints: const BoxConstraints(
+                        minWidth: 18,
+                        minHeight: 18,
+                      ),
+                      child: Text(
+                        '${_criticalBatteries.length}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+
+          // Mode Toggle
           Row(
             children: [
               Text(
@@ -439,14 +610,19 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                 value: _isManualMode,
                 onChanged: _isConnected ? _toggleManualMode : null,
                 activeColor: Colors.orange,
+                inactiveThumbColor: Colors.white,
               ),
             ],
           ),
+
+          // Refresh Button
           if (_isConnected && !_isManualMode)
             IconButton(
-              icon: const Icon(Icons.notifications_active_outlined),
+              icon: const Icon(Icons.refresh),
               onPressed: () => _sendCommand("STATUS"),
             ),
+
+          // Bluetooth Button
           IconButton(
             icon: Icon(
               _isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
@@ -663,7 +839,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
           style: const TextStyle(
             fontWeight: FontWeight.bold,
             fontSize: 16,
-            color: Colors.orange,
+            color: Color.fromARGB(255, 239, 50, 242),
           ),
         ),
         const SizedBox(height: 8),
@@ -759,11 +935,21 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   }
 
   Widget _buildBatteryStatusRow(int batteryIndex) {
+    double voltage = _batteryVoltages[batteryIndex];
+    bool isCritical =
+        _batteryConnected[batteryIndex] &&
+        voltage > 0 &&
+        voltage < CRITICAL_VOLTAGE;
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isCritical ? Colors.red : Colors.grey.shade300,
+          width: isCritical ? 2 : 1,
+        ),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -771,9 +957,18 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                "BATTERY ${batteryIndex + 1}",
-                style: const TextStyle(fontWeight: FontWeight.bold),
+              Row(
+                children: [
+                  Text(
+                    "BATTERY ${batteryIndex + 1}",
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  if (isCritical)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Icon(Icons.warning, color: Colors.red, size: 16),
+                    ),
+                ],
               ),
               Text(
                 _batteryModes[batteryIndex],
@@ -792,13 +987,16 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                         _batteryVoltages[batteryIndex] > 0
                     ? '${_batteryVoltages[batteryIndex].toStringAsFixed(2)} V'
                     : '--- V',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isCritical ? Colors.red : Colors.black,
+                ),
               ),
               Text(
                 _batteryConnected[batteryIndex] ? "Connected" : "Disconnected",
                 style: TextStyle(
                   color: _batteryConnected[batteryIndex]
-                      ? Colors.green
+                      ? (isCritical ? Colors.red : Colors.green)
                       : Colors.red,
                   fontSize: 10,
                 ),
@@ -824,8 +1022,13 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
   }
 
   Widget _buildVoltageCard(int index) {
+    double voltage = _batteryVoltages[index];
+    bool isCritical =
+        _batteryConnected[index] && voltage > 0 && voltage < CRITICAL_VOLTAGE;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 6),
+      color: isCritical ? Colors.red.shade50 : Colors.white,
       child: Padding(
         padding: const EdgeInsets.all(12.0),
         child: Row(
@@ -834,9 +1037,18 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  "BATTERY ${index + 1}",
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                Row(
+                  children: [
+                    Text(
+                      "BATTERY ${index + 1}",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    if (isCritical)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Icon(Icons.warning, color: Colors.red, size: 14),
+                      ),
+                  ],
                 ),
                 Text(
                   _batteryModes[index],
@@ -851,7 +1063,9 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
-                color: _batteryConnected[index] ? Colors.blue : Colors.grey,
+                color: isCritical
+                    ? Colors.red
+                    : (_batteryConnected[index] ? Colors.blue : Colors.grey),
               ),
             ),
           ],
@@ -947,7 +1161,9 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
             ),
             ElevatedButton(
               onPressed: _disconnect,
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color.fromARGB(255, 246, 104, 246),
+              ),
               child: const Text("Disconnect"),
             ),
           ],
@@ -972,7 +1188,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
-                  color: Colors.grey[50],
+                  color: const Color.fromARGB(255, 250, 250, 250),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 padding: const EdgeInsets.all(4),
