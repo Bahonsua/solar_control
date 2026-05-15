@@ -77,6 +77,18 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
     super.dispose();
   }
 
+  // Voltage to Percentage conversion function
+  double _voltageToPercentage(double voltage) {
+    if (voltage <= 0) return 0.0;
+
+    // 13V = 100%, 0V = 0%
+    // Formula: (voltage / 13) * 100
+    double percentage = (voltage / 13.0) * 100.0;
+
+    // Clamp between 0 and 100
+    return percentage.clamp(0.0, 100.0);
+  }
+
   void _startAlertChecker() {
     _alertTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (_isConnected && mounted) {
@@ -122,7 +134,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               const SizedBox(width: 10),
               const Text(
                 '⚠️ CRITICAL VOLTAGE ALERT!',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10),
               ),
             ],
           ),
@@ -145,7 +157,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                           ),
                           const SizedBox(width: 8),
                           Text(
-                            'Battery $batteryNum: ${_batteryVoltages[batteryNum - 1].toStringAsFixed(2)}V',
+                            'Battery $batteryNum: ${_voltageToPercentage(_batteryVoltages[batteryNum - 1]).round()}%',
                             style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
@@ -382,6 +394,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               _batteryVoltages[i - 1] = voltage;
               _batteryConnected[i - 1] = (voltage > 0 && voltage < 20);
             });
+            // Activity log shows real voltage
             _addLog("BATT$i: $voltStr V");
           }
         }
@@ -546,9 +559,20 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('5 Battery Monitor System'),
+        title: null, // Remove the title
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
+        leading: Builder(
+          builder: (BuildContext context) {
+            return IconButton(
+              icon: const Icon(Icons.menu),
+              onPressed: () {
+                Scaffold.of(context).openDrawer();
+              },
+              tooltip: 'Menu',
+            );
+          },
+        ),
         actions: [
           // NEW: Notification Icon with Badge
           if (_isConnected && !_isManualMode)
@@ -595,6 +619,14 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               ],
             ),
 
+          // Bluetooth Button
+          IconButton(
+            icon: Icon(
+              _isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
+            ),
+            onPressed: _isConnected ? _disconnect : _startScanning,
+          ),
+
           // Mode Toggle
           Row(
             children: [
@@ -608,7 +640,23 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               ),
               Switch(
                 value: _isManualMode,
-                onChanged: _isConnected ? _toggleManualMode : null,
+                onChanged: (value) {
+                  if (!_isConnected) {
+                    // Show snackbar message if not connected
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('🤔 Please connect to Bluetooth first!'),
+                        backgroundColor: Colors.red,
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+                    _addLog(
+                      "🔌 Cannot switch mode: Not connected to Bluetooth",
+                    );
+                  } else {
+                    _toggleManualMode(value);
+                  }
+                },
                 activeColor: Colors.orange,
                 inactiveThumbColor: Colors.white,
               ),
@@ -621,15 +669,392 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               icon: const Icon(Icons.refresh),
               onPressed: () => _sendCommand("STATUS"),
             ),
-
-          // Bluetooth Button
-          IconButton(
-            icon: Icon(
-              _isConnected ? Icons.bluetooth_connected : Icons.bluetooth,
-            ),
-            onPressed: _isConnected ? _disconnect : _startScanning,
-          ),
         ],
+      ),
+      drawer: Drawer(
+        child: Container(
+          color: Colors.white, // Simple white background
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Colors.blue, // Simple blue background
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 85,
+                      height: 85,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 3),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            spreadRadius: 2,
+                            blurRadius: 5,
+                          ),
+                        ],
+                      ),
+                      child: ClipOval(
+                        child: Image.asset(
+                          'assets/images/school_logo.png',
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Container(
+                              color: Colors.white,
+                              child: const Icon(
+                                Icons.school,
+                                size: 50,
+                                color: Colors.blue,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Smart Solar Battery Switching And Monitoring',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    const Text(
+                      'System for Efficient Energy Utilization',
+                      style: TextStyle(color: Colors.white, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12.0), // Reduced padding
+                child: Column(
+                  children: [
+                    // Developer 1
+                    Container(
+                      margin: const EdgeInsets.only(
+                        bottom: 8,
+                      ), // Small padding between developers
+                      padding: const EdgeInsets.all(10), // Small inner padding
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.blue, width: 2),
+                            ),
+                            child: ClipOval(
+                              child: Image.asset(
+                                'assets/images/developer.jpg',
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    color: Colors.blue.shade100,
+                                    child: const Icon(
+                                      Icons.person,
+                                      size: 30,
+                                      color: Colors.blue,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Job S. Bahonsua',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const Text(
+                                  'BS - Computer Science',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Color.fromARGB(255, 15, 13, 13),
+                                  ),
+                                ),
+                                const Text(
+                                  'Lead Developer Kuno',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.blue,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Developer 2
+                    Container(
+                      margin: const EdgeInsets.only(
+                        bottom: 8,
+                      ), // Small padding between developers
+                      padding: const EdgeInsets.all(10), // Small inner padding
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.blue, width: 2),
+                            ),
+                            child: ClipOval(
+                              child: Image.asset(
+                                'assets/images/developer2.jpg',
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    color: Colors.blue.shade100,
+                                    child: const Icon(
+                                      Icons.person,
+                                      size: 30,
+                                      color: Colors.blue,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Jason L. Napigkit',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const Text(
+                                  'BS - Computer Science',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Color.fromARGB(255, 12, 10, 10),
+                                  ),
+                                ),
+                                const Text(
+                                  'Document Specialist',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.blue,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Developer 3
+                    Container(
+                      margin: const EdgeInsets.only(
+                        bottom: 8,
+                      ), // Small padding between developers
+                      padding: const EdgeInsets.all(10), // Small inner padding
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.blue, width: 2),
+                            ),
+                            child: ClipOval(
+                              child: Image.asset(
+                                'assets/images/developer3.jpg',
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    color: Colors.blue.shade100,
+                                    child: const Icon(
+                                      Icons.person,
+                                      size: 30,
+                                      color: Colors.blue,
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Roniel P. Belotindos',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const Text(
+                                  'BS - Computer Science',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Color.fromARGB(255, 12, 10, 10),
+                                  ),
+                                ),
+                                const Text(
+                                  'Battery Charging Panday Specialist',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.blue,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    Card(
+                      elevation: 2,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: ListTile(
+                        leading: const Icon(
+                          Icons.info_outline,
+                          color: Colors.blue,
+                        ),
+                        title: const Text('About'),
+                        subtitle: const Text('App version 11.0.%'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _addLog("Opened about section");
+                          showDialog(
+                            context: context,
+                            builder: (BuildContext context) {
+                              return AlertDialog(
+                                title: const Text(
+                                  'About Smart Battery Monitor',
+                                ),
+                                content: const Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'A comprehensive battery monitoring solution',
+                                    ),
+                                    SizedBox(height: 10),
+                                    Text('Features:'),
+                                    SizedBox(height: 5),
+                                    Text('• Real-time battery monitoring'),
+                                    Text('• Bluetooth connectivity'),
+                                    Text('• Manual/Auto modes'),
+                                    Text('• Relay control'),
+                                    Text('• Critical alerts'),
+                                  ],
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: const Text('OK'),
+                                  ),
+                                ],
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+
+                    const SizedBox(height: 10),
+
+                    Card(
+                      elevation: 2,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: ListTile(
+                        leading: const Icon(Icons.settings, color: Colors.blue),
+                        title: const Text('Settings'),
+                        subtitle: const Text('App preferences'),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _addLog("Settings clicked");
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Settings coming soon!'),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      child: const Column(
+                        children: [
+                          Text(
+                            '© 2025-2026 Thesis 2',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Color.fromARGB(255, 8, 6, 6),
+                            ),
+                          ),
+                          Text(
+                            'Instructor: ARMANDO T. SAGUIN JR., MSIT',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Color.fromARGB(255, 8, 6, 6),
+                            ),
+                          ),
+                          Text(
+                            'All Rights Reserved',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Color.fromARGB(255, 17, 14, 14),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
       body: Container(
         decoration: BoxDecoration(
@@ -775,7 +1200,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
                     child: Column(
                       children: [
                         const Text(
-                          "5 BATTERY VOLTAGES",
+                          "5 BATTERY LEVELS",
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -936,6 +1361,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
   Widget _buildBatteryStatusRow(int batteryIndex) {
     double voltage = _batteryVoltages[batteryIndex];
+    int percentage = _voltageToPercentage(voltage).round();
     bool isCritical =
         _batteryConnected[batteryIndex] &&
         voltage > 0 &&
@@ -985,10 +1411,11 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
               Text(
                 _batteryConnected[batteryIndex] &&
                         _batteryVoltages[batteryIndex] > 0
-                    ? '${_batteryVoltages[batteryIndex].toStringAsFixed(2)} V'
-                    : '--- V',
+                    ? '$percentage%'
+                    : '---%',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
+                  fontSize: 18,
                   color: isCritical ? Colors.red : Colors.black,
                 ),
               ),
@@ -1023,6 +1450,7 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
 
   Widget _buildVoltageCard(int index) {
     double voltage = _batteryVoltages[index];
+    int percentage = _voltageToPercentage(voltage).round();
     bool isCritical =
         _batteryConnected[index] && voltage > 0 && voltage < CRITICAL_VOLTAGE;
 
@@ -1058,8 +1486,8 @@ class _BatteryMonitorScreenState extends State<BatteryMonitorScreen> {
             ),
             Text(
               _batteryConnected[index] && _batteryVoltages[index] > 0
-                  ? '${_batteryVoltages[index].toStringAsFixed(2)} V'
-                  : '--- V',
+                  ? '$percentage%'
+                  : '---%',
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
